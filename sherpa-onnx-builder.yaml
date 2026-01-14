@@ -1,0 +1,149 @@
+# sherpa-onnx multi-platform builder
+# This workflow clones sherpa-onnx from GitHub and builds C++/Java/Python artifacts
+# Usage: Put this file in .github/workflows/ of any repository, then manually trigger
+name: sherpa-onnx-builder
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'sherpa-onnx version/tag (e.g., v1.12.22)'
+        required: true
+        type: string
+      platform:
+        description: 'Target platform'
+        required: true
+        type: choice
+        options:
+          - linux-x64
+          - linux-arm64
+      gpu:
+        description: 'Enable GPU support'
+        required: false
+        type: choice
+        options:
+          - 'OFF'
+          - 'ON'
+        default: 'OFF'
+      build_type:
+        description: 'Build type'
+        required: false
+        type: choice
+        options:
+          - Release
+          - Debug
+        default: 'Release'
+
+jobs:
+  build:
+    name: Build ${{ inputs.platform }} GPU ${{ inputs.gpu }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            runner: ubuntu-latest
+            arch: x86_64
+          - platform: linux-arm64
+            runner: ubuntu-22.04-arm
+            arch: aarch64
+
+    steps:
+      - name: Checkout sherpa-onnx ${{ inputs.version }}
+        uses: actions/checkout@v4
+        with:
+          repository: k2-fsa/sherpa-onnx
+          ref: ${{ inputs.version }}
+          fetch-depth: 1
+
+      - name: Get version info
+        id: version_info
+        run: |
+          echo "VERSION=${{ inputs.version }}" >> $GITHUB_OUTPUT
+          echo "ARCH=${{ matrix.arch }}" >> $GITHUB_OUTPUT
+          echo "GPU=${{ inputs.gpu }}" >> $GITHUB_OUTPUT
+          echo "SUFFIX=linux-${ARCH}-gpu-${GPU}" >> $GITHUB_OUTPUT
+
+      - name: Install system dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            cmake \
+            g++ \
+            libalsa-lib-dev \
+            python3 \
+            python3-pip \
+            openjdk-17-jdk \
+            ca-certificates \
+            wget \
+            tar
+
+      - name: Build with CMake
+        run: |
+          mkdir -p build && cd build
+          cmake .. \
+            -DCMAKE_BUILD_TYPE=${{ inputs.build_type }} \
+            -DBUILD_SHARED_LIBS=ON \
+            -DSHERPA_ONNX_ENABLE_PYTHON=ON \
+            -DSHERPA_ONNX_ENABLE_JNI=ON \
+            -DSHERPA_ONNX_ENABLE_GPU=${{ inputs.gpu }} \
+            -DSHERPA_ONNX_ENABLE_TESTS=OFF \
+            -DSHERPA_ONNX_ENABLE_C_API=ON
+          cmake --build . -j$(nproc)
+
+      - name: Show build artifacts
+        run: |
+          echo "=== Build directory ==="
+          ls -la build/
+          echo ""
+          echo "=== Python wheels ==="
+          ls -la build/*.whl 2>/dev/null || echo "No wheels found"
+          echo ""
+          echo "=== Java JAR ==="
+          ls -la build/sherpa-onnx-java-api/*.jar 2>/dev/null || echo "No JAR found"
+
+      - name: Package C++ libraries
+        if: matrix.platform != ''
+        run: |
+          VERSION=${{ steps.version_info.outputs.VERSION }}
+          SUFFIX=${{ steps.version_info.outputs.SUFFIX }}
+          mkdir -p package
+          cp -a build/install/bin package/
+          cp -a build/install/lib package/
+          # Remove debug symbols to reduce size
+          strip package/bin/* 2>/dev/null || true
+          tar cjvf sherpa-onnx-${VERSION}-${SUFFIX}.tar.bz2 -C package .
+
+      - name: Upload C++ artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sherpa-onnx-${{ matrix.platform }}-gpu-${{ inputs.gpu }}-${{ inputs.version }}
+          path: sherpa-onnx-*.tar.bz2
+
+      - name: Upload Java JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: sherpa-onnx-java-${{ matrix.platform }}-gpu-${{ inputs.gpu }}-${{ inputs.version }}
+          path: build/sherpa-onnx-java-api/sherpa-onnx.jar
+
+      - name: Upload Python wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: sherpa-onnx-python-${{ matrix.platform }}-gpu-${{ inputs.gpu }}-${{ inputs.version }}
+          path: build/*.whl
+
+      - name: Display build summary
+        run: |
+          echo ""
+          echo "=== Build Summary ==="
+          echo "Version: ${{ inputs.version }}"
+          echo "Platform: ${{ matrix.platform }}"
+          echo "Architecture: ${{ matrix.arch }}"
+          echo "GPU: ${{ inputs.gpu }}"
+          echo "Build Type: ${{ inputs.build_type }}"
+          echo ""
+          echo "=== Artifacts Uploaded ==="
+          echo "- sherpa-onnx-${{ matrix.platform }}-gpu-${{ inputs.gpu }}-${{ inputs.version }} (C++ libraries)"
+          echo "- sherpa-onnx-java-${{ matrix.platform }}-gpu-${{ inputs.gpu }}-${{ inputs.version }} (Java JAR)"
+          echo "- sherpa-onnx-python-${{ matrix.platform }}-gpu-${{ inputs.gpu }}-${{ inputs.version }} (Python wheel)"
